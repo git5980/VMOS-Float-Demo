@@ -1,7 +1,28 @@
-# 修复报告（v1.9 → v1.10）
+# 修复报告（v1.9 → v1.11）
 
 基线：`VMOS-Float-Demo-v1.8-source`（versionCode 9 / 1.8）
-结果：versionCode 11 / **1.10**，已编译通过并产出签名 APK。
+结果：versionCode 12 / **1.11**，已编译通过并产出签名 APK。
+
+## v1.11（加真机诊断仪表）
+
+真机用 `dumpsys window` 采样球窗口 frame 的结论：**采样只能证明"球最后停在哪"，证不了
+"停下的那一刻手指在哪"**——拖动期间球窗口是 `lp.x + translationX`（跟手靠 translation，
+frame 里只有 lp.x），所以"松手停在 935"和"动画途经 935"在 frame 上长得一样，
+0.6s 的采样周期也抓不住 200ms 级的竞态。
+
+于是加了一组毫秒级诊断日志（tag `FloatDemo`，`TRACE` 常量可关），覆盖所有可能移动球的入口：
+
+| 日志 | 位置 | 能回答什么 |
+|---|---|---|
+| `DOWN raw=(x,y) ballX=… winOpen=…` | 手势按下 | 按下瞬间的真实球位 |
+| `UP moved=… winDrag=… ballX=…` | 手势抬起 | 这一下手势被判成了拖动/拉窗/点击 |
+| `settle -> x=… y=…` | 落点结算 | 手指离开时球到底停在哪（y 变化=发生了新的 settle） |
+| `animBallTo A -> B winOpen=… gesture=… dragging=…` | 每次球的动画 | **谁在动球**，当时的窗口与手势状态 |
+| `openWin / closeWin / retractWin ballX=…` | 三个入口 | 是哪一个入口发起的 |
+| `winAnim end …` | 窗户动画收尾 | 收尾时球是否被动过 |
+| `applyBallLayout 失败…` | 缩回异常 | 全屏窗口兜底是否真的触发过 |
+
+取日志：`adb-shell "logcat -d -s FloatDemo"`（只读，已实测可用）。
 
 ## v1.10（真机反馈修复）
 
