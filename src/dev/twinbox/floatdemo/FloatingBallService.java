@@ -20,12 +20,14 @@ import android.widget.Toast;
 /**
  * VMOS 悬浮窗功能 Demo（架构复刻）。
  *
- * 交互（与 VMOS Pro 一致）：
- *  - 悬浮球：自由拖动（拖动中半透明），松手停在原地（v1.8 起不再自动吸边）；
- *  - 球在右半屏向左拖：拉出"窗户"——窗口跟手展开（内容实时渲染），
- *    过半松手=全开（球到左缘），不足=收回；
- *  - 窗户开着（球在左缘）向右拖：窗户收回（跟手），过半=全收；
- *  - 点球：窗户开着=一键收回；没开=弹菜单（VMOS 式功能菜单）。
+ * 交互（v1.14 最终形态）：
+ *  - **窗户与球绑死**：窗户左缘 = 球的左边，露出量 = 屏宽 − 球的 x；
+ *  - 球跟手拖动（拖动中半透明），**可上下移动**；球被限制在完全可见范围内，
+ *    永不出现"被推出屏外/被裁剪=消失"；
+ *  - 球在右半屏向左拖 → 窗户跟手拉出（内容实时渲染）；过半松手全开、
+ *    不足收回——两种情况都是**窗户带着球走**，球不会自己单独跑一段；
+ *  - 窗户开着时向右拖 → 窗户收回（跟手），过半=全收；
+ *  - 点球：窗户开着=一键收回（窗户合、球随边缘回右缘）；没开=弹菜单。
  *
  * 技术（逆向 VMOS 3.1.4 得到的架构）：
  *  - 球和窗户都是 TYPE_APPLICATION_OVERLAY 悬浮窗；
@@ -49,6 +51,14 @@ import android.widget.Toast;
  *    会在窗户动画收尾时无用户意图地挪球）；
  *  - 拉窗没过半的中止路径改为 retractWin()（只收窗不动球），不再 closeWin()。
  *  ⇒ 现在只有"用户明确开窗/关窗"这两条路径会动画移动球，其余情况球一律停在松手处。
+ *
+ * v1.14 修复（按用户明确规格重做绑定关系）：
+ *  - 球为主动方：窗户露出量 = 屏宽 − 球的 x（球即窗户左缘，两者绑死）；
+ *  - 拖动时可上下移动（旧版拉窗只改 x，球在竖直方向不跟手）；
+ *  - 球的 x 一律 clamp 在"整个球都在屏内"（旧版夹到屏宽−8，球会被推出屏外=消失）；
+ *  - 开合动画期间由露出量反推球的 x：球被窗户左缘带着走，永不脱钩，
+ *    也不再有"球自己跑一段"的观感；
+ *  - 删除球的独立动画（animBallTo / mBallAnim），"动画与手势抢球"整类竞态消失。
  */
 public class FloatingBallService extends Service {
 
@@ -71,22 +81,12 @@ public class FloatingBallService extends Service {
     private boolean mExpanded;              // v1.5：拖动中球窗口是否已扩成全屏（防 translation 被裁剪）
     private boolean mDeadGesture;           // v1.7：多指污染的手势（后续 MOVE 忽略，UP 只复位）
     private boolean mGestureActive;         // v1.9：手指仍按着（含未起拖/死亡手势），自动同步必须让位
-    private android.animation.ValueAnimator mBallAnim; // v1.2：球贴边/开关窗动画（可打断）
     private android.animation.ValueAnimator mWinAnim;  // v1.2：窗户展开量动画（可打断）
     private int mSlop;                      // v1.2：系统 touchSlop（点击/拖动判定门槛）
     private int mWinDragSlop;               // v1.9：进入拉窗/收窗模式的横向门槛（dp 换算，旧版硬编码 20px）
     private int mMenuMargin, mMenuGap;      // v1.9：菜单贴边留白 / 与球的垂直间距（dp 换算）
     private android.os.Handler mHandler;    // v1.9：看门狗用的主线程 Handler
     private android.hardware.display.DisplayManager mDm; // v1.9：屏幕尺寸变化（旋转/折叠/分屏）监听
-    // ---- v1.12.2：把手（球）归位行为，菜单里可切换，便于一次安装里对比手感 ----
-    private static final int HANDLE_ANIM = 0;    // v1.12 原样：200ms 动画滑回把手位
-    private static final int HANDLE_FOLLOW = 1;  // 跟着窗户边缘走（球=把手，始终贴合，不脱钩）
-    private static final int HANDLE_SNAP = 2;    // 瞬间归位（无动画、无"在路上"）
-    private static final int HANDLE_FREE = 3;    // v1.13：完全不归位
-    private static final String[] HANDLE_NAMES = {"动画归位", "跟随窗户", "瞬间归位", "不归位"};
-    private static final String PREFS = "floatdemo";
-    private int mHandleMode = HANDLE_ANIM;
-
     private static final int BALL = 128; // dp 无关，直接 px（Demo）
     private static final String CHANNEL_ID = "demo";
     private static final long EXPAND_WATCHDOG_MS = 2500;  // v1.9：扩窗后的最长存活时间
@@ -191,8 +191,6 @@ public class FloatingBallService extends Service {
         mWinDragSlop = Math.round(20 * d);
         mMenuMargin = Math.round(12 * d);
         mMenuGap = Math.round(20 * d);
-        mHandleMode = getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getInt("handle_mode", HANDLE_ANIM);
         // 先拿 DisplayManager：refreshMetrics() 优先用它，拿不到再退回 WindowManager
         mDm = (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
         refreshMetrics();
@@ -254,11 +252,7 @@ public class FloatingBallService extends Service {
             return;
         }
         hideMenu();   // 菜单位置是按旧尺寸算的，直接收掉
-        // 动画目标来自旧尺寸，先全部取消，避免滑向错误坐标
-        if (mBallAnim != null) {
-            mBallAnim.cancel();
-            mBallAnim = null;
-        }
+        // 动画目标来自旧尺寸，先取消，避免滑向错误坐标
         if (mWinAnim != null) {
             mWinAnim.cancel();
             mWinAnim = null;
@@ -410,21 +404,35 @@ public class FloatingBallService extends Service {
         }
     };
 
-    /** 窗户可见量 = 球位置（球即窗户左缘）。 */
+    /**
+     * 窗户露出量 = 屏幕宽 − 球的 x（球即窗户左缘，两者绑死）。
+     *
+     * v1.14：开合动画期间在这里反推球的位置，让球**始终贴在窗户左缘**上——
+     * 观感是"窗户在开合、球是它的把手被带着走"，而不是球自己单独跑一段；
+     * 也保证球不会被推出屏外（x 被 clamp 在完全可见范围内）。
+     * 拖动中（mDragging）球是主动方，由手指驱动，这里不插手。
+     */
     private void setWinProgress(int amount) {
         final int reveal = Math.max(0, Math.min(mScreenW, amount));
-        // v1.12.2「跟随窗户」模式：开合动画期间让球跟着窗户左缘一起走，球与窗户永不
-        // 脱钩；观感是"窗户在动、球被它带着"，而不是球自己单独跑一段。
-        if (mHandleMode == HANDLE_FOLLOW && !mDragging && !mGestureActive
-                && mBall != null && mBallLp != null) {
-            mBallLp.x = Math.max(0, Math.min(mScreenW - BALL, mScreenW - reveal));
-            mBall.setTranslationX(0);
-            try {
-                mWm.updateViewLayout(mBall, mBallLp);
-            } catch (Throwable ignore) {
-            }
+        if (!mDragging && !mGestureActive && mBall != null && mBallLp != null) {
+            setBallX(clampBallX(mScreenW - reveal));
         }
         mWin.setTranslationX(mScreenW - reveal);
+    }
+
+    /** 球的 x 只允许落在"整个球都在屏内"的范围（旧版允许到屏宽−8，球会被推出屏外=消失）。 */
+    private int clampBallX(int x) {
+        return Math.max(0, Math.min(mScreenW - BALL, x));
+    }
+
+    /** 直接摆球的 x（无动画），用于"窗户带着球走"。 */
+    private void setBallX(int x) {
+        mBallLp.x = clampBallX(x);
+        mBall.setTranslationX(0);
+        try {
+            mWm.updateViewLayout(mBall, mBallLp);
+        } catch (Throwable ignore) {
+        }
     }
 
     // ---------------------------------------------------------------- 球
@@ -469,13 +477,7 @@ public class FloatingBallService extends Service {
     private boolean handleTouch(MotionEvent event) {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                // v1.2 修"拖拉没反应"：按下瞬间必须停掉一切还在跑的动画。
-                // 旧版 animBallTo 每帧 updateViewLayout 写 mBallLp.x，动画没 cancel
-                // 就开始拖 = 动画和 translation 打架，球不跟手/自己滑走。
-                if (mBallAnim != null) {
-                    mBallAnim.cancel();
-                    mBallAnim = null;
-                }
+                // v1.14：球已无独立动画（位置完全由窗户露出量反推），只需打断窗户动画。
                 if (mWinAnim != null) {
                     mWinAnim.cancel();
                     mWinAnim = null;
@@ -536,13 +538,6 @@ public class FloatingBallService extends Service {
                 if (!mDragging && (Math.abs(dx) > mSlop || Math.abs(dy) > mSlop)) {
                     mDragging = true;
                     hideMenu();
-                    // v1.8：拖动真正开始的瞬间也 cancel 球动画（防御纵深）——
-                    // DOWN 之后才启动的动画（如窗户完成动画收尾的把手同步）在
-                    // 用户按住未动期间启动，此时开拖必须立即让位，否则打架。
-                    if (mBallAnim != null) {
-                        mBallAnim.cancel();
-                        mBallAnim = null;
-                    }
                 }
                 if (!mDragging) {
                     return true;
@@ -601,14 +596,19 @@ public class FloatingBallService extends Service {
                         mWinAnim.cancel();
                         mWinAnim = null;
                     }
-                    // 球 = 窗户左缘，跟手（translation 零 binder）
-                    int nx = (int) Math.max(0, Math.min(mScreenW - 8, mStartX + dx));
+                    // v1.14：球 = 窗户左缘，跟手（translation 零 binder）。
+                    // x 夹在"整个球都在屏内"，旧版夹到屏宽−8 会让球被推出屏外=看起来消失。
+                    int nx = clampBallX(mStartX + (int) dx);
                     if (mWinLp.width == 0) {
                         // 拉出首帧：先摆好 translation 再点亮，防全屏内容闪现一帧
                         setWinProgress(mScreenW - nx);
                         setWinActive(true);
                     }
+                    // v1.14：拉窗时也允许上下移动（用户要求：拖动时球能上下走）
+                    int ty = (int) Math.max(-mStartY,
+                            Math.min(mScreenH - BALL - mStartY, dy));
                     mBall.setTranslationX(nx - mStartX);
+                    mBall.setTranslationY(ty);
                     setWinProgress(mScreenW - nx);
                 } else {
                     // 自由移动（clamp 屏内；窗口已扩全屏，永不裁剪）
@@ -655,18 +655,17 @@ public class FloatingBallService extends Service {
         settleBall();
         if (mWinDrag) {
             mWinDrag = false;
+            // v1.14：必须先清 mDragging 再开关窗——setWinProgress 里的"窗户带球走"
+            // 逻辑以 !mDragging 为前提，旧代码这条分支提前 return，标志残留为 true
+            // 会让球在收尾动画里不跟窗户边缘走。
+            mDragging = false;
+            mMenuEatenOnDown = false;
             if (mBallLp.x < mScreenW / 2) {
                 openWin();
-            } else if (mWinOpen) {
-                closeWin();      // 收窗手势过半：窗户全收，把手（球）贴回右缘
             } else {
-                // v1.10 修"拖动结束后球自己滑一下"：拉窗没过半的中止路径。
-                // v1.8 这里走的是 closeWin()，它会 animBallTo(右缘)——球从松手位置
-                // 动画滑回右缘；v1.9 把拉窗入口放宽到"球在右半屏"之后，一次普通的
-                // 水平拖球也会被当成拉窗，于是每次松手都看到球自己滑一次。
-                // 中止就该只是"把窗户缩回去"，球停在松手处（与 v1.8 定的
-                // "拖到位就是到位"一致）。
-                retractWin();
+                // v1.14：拉窗没过半 = 窗户收回。球由窗户左缘带着一起回右缘
+                // （两者绑死，不存在"球自己跑一段"——球的移动就是窗户在合）。
+                closeWin();
             }
             return true;
         }
@@ -677,8 +676,8 @@ public class FloatingBallService extends Service {
                 toggleMenu();        // VMOS 式功能菜单（本手势若已关过菜单则不重弹）
             }
         }
-        // v1.8 修"放手后球又自己滑一次"：移除松手贴边动画——球停在松手位置
-        // （拖到位就是到位）。窗户开合的把手动画仍由 openWin/closeWin 自带。
+        // v1.14：球没有独立动画；松手后球是否移动只取决于窗户是否需要开合，
+        // 需要时由窗户左缘带着走（两者绑死）。
         mDragging = false;
         mMenuEatenOnDown = false;
         return true;
@@ -731,62 +730,31 @@ public class FloatingBallService extends Service {
     }
 
     /** 窗户全开：球到左缘，窗户铺满。 */
-    /** v1.12.2：把球直接放到指定 x（无动画）。 */
-    private void snapBallTo(int x) {
-        mBallLp.x = Math.max(0, Math.min(mScreenW - BALL, x));
-        mBall.setTranslationX(0);
-        try {
-            mWm.updateViewLayout(mBall, mBallLp);
-        } catch (Throwable ignore) {
-        }
-    }
-
-    /** v1.12.2：按当前把手模式决定"开/关窗时球怎么回到把手位"。 */
-    private void moveBallToHandle(boolean open) {
-        final int dockX = open ? 0 : mScreenW - BALL;
-        switch (mHandleMode) {
-            case HANDLE_ANIM:
-                animBallTo(dockX);      // v1.12 原样：200ms 滑回
-                break;
-            case HANDLE_SNAP:
-                snapBallTo(dockX);      // 瞬间到位
-                break;
-            case HANDLE_FOLLOW:
-            case HANDLE_FREE:
-            default:
-                break;                  // FOLLOW 由 setWinProgress 每帧带着走；FREE 不动
-        }
-    }
-
+    /**
+     * 窗户全开：露出量动画到满屏，球被窗户左缘带着走到左缘（x=0）。
+     * v1.14：球没有任何独立动画，它的位置完全由窗户露出量决定（两者绑死）。
+     */
     private void openWin() {
-        trace("openWin  ballX=" + mBallLp.x + " handle=" + HANDLE_NAMES[mHandleMode]);
+        trace("openWin  ballX=" + mBallLp.x);
         mWinOpen = true;
         if (mWinLp.width == 0) {
             setWinProgress(0);
             setWinActive(true);
         }
-        moveBallToHandle(true);
         startWinAnim(mScreenW);
     }
 
-    /** 窗户收回：窗户滑回右墙；动画结束彻底熄灭窗口（surface 销毁）。 */
+    /**
+     * 窗户收回：露出量动画到 0，球被窗户左缘带着回到右缘（x=屏宽−球宽）；
+     * 动画结束彻底熄灭窗口（surface 销毁）。
+     */
     private void closeWin() {
-        trace("closeWin ballX=" + mBallLp.x + " handle=" + HANDLE_NAMES[mHandleMode]);
+        trace("closeWin ballX=" + mBallLp.x);
         mWinOpen = false;
-        moveBallToHandle(false);
         startWinAnim(0);
     }
 
-    /**
-     * v1.10：只把窗户缩回去，**不动球**。
-     * 用于"拉窗手势没过半"的中止——球停在松手处，不做任何自动位移动画。
-     */
-    private void retractWin() {
-        trace("retractWin ballX=" + mBallLp.x + " handle=" + HANDLE_NAMES[mHandleMode]);
-        mWinOpen = false;
-        moveBallToHandle(false);   // v1.12.2：中止路径同样遵循当前把手模式
-        startWinAnim(0);
-    }
+
 
     /** 窗户展开量动画（amount: 0=全收, screenW=全开）。存字段便于按下时打断。 */
     private void startWinAnim(int targetAmount) {
@@ -833,42 +801,6 @@ public class FloatingBallService extends Service {
         a.start();
     }
 
-    private void animBallTo(final int targetX) {
-        trace("animBallTo " + mBallLp.x + " -> " + targetX
-                + " winOpen=" + mWinOpen + " gesture=" + mGestureActive
-                + " dragging=" + mDragging + " expanded=" + mExpanded);
-        if (mBallAnim != null) {
-            mBallAnim.cancel();
-            mBallAnim = null;
-        }
-        final android.animation.ValueAnimator a = android.animation.ValueAnimator.ofInt(mBallLp.x, targetX);
-        a.setDuration(200);
-        a.setInterpolator(new android.view.animation.DecelerateInterpolator());
-        a.addUpdateListener(new android.animation.ValueAnimator.AnimatorUpdateListener() {
-            @Override
-            public void onAnimationUpdate(android.animation.ValueAnimator anim) {
-                mBallLp.x = (Integer) anim.getAnimatedValue();
-                try {
-                    mWm.updateViewLayout(mBall, mBallLp);
-                } catch (Throwable ignore) {
-                }
-            }
-        });
-        // v1.9：跑完/被打断都要复位句柄——否则 mBallAnim 的语义会退化成
-        // "曾经启动过动画"，DOWN/MOVE 里的 `mBallAnim != null 就 cancel` 会误判，
-        // 也会让"球动画是否在跑"这个判断永远为真。
-        a.addListener(new android.animation.AnimatorListenerAdapter() {
-            @Override
-            public void onAnimationEnd(android.animation.Animator animation) {
-                if (mBallAnim == a) {
-                    mBallAnim = null;
-                }
-            }
-        });
-        mBallAnim = a;
-        a.start();
-    }
-
     // ---------------------------------------------------------------- 菜单（VMOS 式）
 
     private void toggleMenu() {
@@ -885,7 +817,6 @@ public class FloatingBallService extends Service {
                 {"◀ 模拟返回", "返回上一级（模拟）"},
                 {"□ 模拟多任务", "最近任务（模拟）"},
                 {"✕ 关闭窗户", null},
-                {"↔ 把手： " + HANDLE_NAMES[mHandleMode] + "（点击切换）", "handle"},
                 {"🞂 退出 Demo", "exit"},
         };
         for (final String[] it : items) {
@@ -900,8 +831,6 @@ public class FloatingBallService extends Service {
                     hideMenu();
                     if (it[1] == null) {
                         closeWin();
-                    } else if ("handle".equals(it[1])) {
-                        cycleHandleMode();
                     } else if ("exit".equals(it[1])) {
                         stopSelf();
                     } else {
@@ -958,24 +887,6 @@ public class FloatingBallService extends Service {
         }
     }
 
-    /**
-     * v1.12.2：循环切换把手归位模式并持久化（重启不丢）。
-     *   动画归位 = v1.12 原样（200ms 滑回把手位）
-     *   跟随窗户 = 开合动画期间球跟着窗户左缘走，永不脱钩
-     *   瞬间归位 = 松手即回把手位，没有过程
-     *   不归位   = v1.13 模型（球只跟手）
-     */
-    private void cycleHandleMode() {
-        mHandleMode = (mHandleMode + 1) % HANDLE_NAMES.length;
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putInt("handle_mode", mHandleMode).apply();
-        trace("handle mode -> " + HANDLE_NAMES[mHandleMode]);
-        if (mHandleMode == HANDLE_SNAP) {
-            snapBallTo(mWinOpen ? 0 : mScreenW - BALL);   // 立刻给个直观反馈
-        }
-        Toast.makeText(this, "把手模式：" + HANDLE_NAMES[mHandleMode], Toast.LENGTH_SHORT).show();
-    }
-
     private void hideMenu() {
         if (mMenu != null && mMenu.getParent() != null) {
             try {
@@ -1001,9 +912,6 @@ public class FloatingBallService extends Service {
             }
         }
         hideMenu();
-        if (mBallAnim != null) {
-            mBallAnim.cancel();
-        }
         if (mWinAnim != null) {
             mWinAnim.cancel();
         }
