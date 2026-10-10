@@ -94,7 +94,7 @@ frame 里只有 lp.x），所以"松手停在 935"和"动画途经 935"在 frame
 | 6 | 🟡 菜单错位 | 菜单定位用硬编码 `mw=440, mh=430` **px** 估计（xxhdpi 上仅 ~147dp），"永不压球 / 不越界"的前提失效 | 先 `measure()` 再定位，留白与间距 dp 化 | `:792` |
 | 7 | ⚪ 性能 | `VmScreenView.onDraw` 每帧 `new SimpleDateFormat` + `new RadialGradient`（60/s 垃圾） | 缓存格式化器；shader 仅在色相漂移 ≥1.5° 或尺寸变化时重建 | `VmScreenView.java:92`、`:112` |
 | 8 | ⚪ 重复代码 | `onDraw` 与 `hitApp` 各写一遍网格公式（改一处忘一处 = "看得到点不中"） | 抽成 `gridTop/cellSize/iconCx/iconCy` 唯一来源 | `VmScreenView.java:152` |
-| 9 | ⚪ 构建 | 写死 `/home/z/android-sdk`、ECJ、keystore 绝对路径 + 明文口令；`java ... \|\| true` 丢掉退出码；aapt2 未传 min/target SDK | 环境变量 + 自动探测；keystore 缺失自动生成；以退出码判定并兼容 javac/ECJ 两种错误格式；补 `--min-sdk-version/--target-sdk-version` | `build.sh:47`、`:100`、`:123` |
+| 9 | ⚪ 构建 | 写死机器相关的 SDK / ECJ / keystore 绝对路径 + 明文口令；`java ... \|\| true` 丢掉退出码；aapt2 未传 min/target SDK | 环境变量 + 自动探测；keystore 缺失自动生成；以退出码判定并兼容 javac/ECJ 两种错误格式；补 `--min-sdk-version/--target-sdk-version` | `build.sh:47`、`:100`、`:123` |
 | 10 | ⚪ 交付 | 无 launcher 图标；无版本控制 | 新增 `res/drawable/ic_launcher.xml` 并在 manifest 引用；`git init` + 首次提交 + `.gitignore` | `AndroidManifest.xml`、`.gitignore` |
 | 11 | ⚪ 文案 | 类注释与主界面说明仍在描述 v1.8 已删除的"松手贴边" | 按实际行为重写三处文案 | `FloatingBallService.java:24`、`MainActivity.java:41` |
 
@@ -143,9 +143,9 @@ Verified using v3 scheme (APK Signature Scheme v3): true
 
 - v1.9 / v1.10 用的是新建签名库 `build/twinbox.keystore`（口令取自 `KS_PASS`，默认值仅供本地调试）；
   手机上现在装的 1.9 就是这把钥匙签的，所以 **v1.10 可以直接覆盖安装**。
-- 最初的 v1.8 是 `/home/z/my-project/vmclone/twinbox2/build/twinbox.keystore` 签的。
+- 最初的 v1.8 是用另一把库外签名库签的（不在本仓库内）。
   若以后要回到原来的签名身份（例如与 `dev.twinbox.app` 双生盒共用签名），请在有原签名库的机器上：
 
 ```bash
-KS=/home/z/my-project/vmclone/twinbox2/build/twinbox.keystore KS_PASS=<原口令> ./build.sh
+KS=/path/to/原签名库.keystore KS_PASS=<原口令> ./build.sh
 ```
