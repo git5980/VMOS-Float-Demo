@@ -78,6 +78,15 @@ public class FloatingBallService extends Service {
     private int mMenuMargin, mMenuGap;      // v1.9：菜单贴边留白 / 与球的垂直间距（dp 换算）
     private android.os.Handler mHandler;    // v1.9：看门狗用的主线程 Handler
     private android.hardware.display.DisplayManager mDm; // v1.9：屏幕尺寸变化（旋转/折叠/分屏）监听
+    // ---- v1.12.2：把手（球）归位行为，菜单里可切换，便于一次安装里对比手感 ----
+    private static final int HANDLE_ANIM = 0;    // v1.12 原样：200ms 动画滑回把手位
+    private static final int HANDLE_FOLLOW = 1;  // 跟着窗户边缘走（球=把手，始终贴合，不脱钩）
+    private static final int HANDLE_SNAP = 2;    // 瞬间归位（无动画、无"在路上"）
+    private static final int HANDLE_FREE = 3;    // v1.13：完全不归位
+    private static final String[] HANDLE_NAMES = {"动画归位", "跟随窗户", "瞬间归位", "不归位"};
+    private static final String PREFS = "floatdemo";
+    private int mHandleMode = HANDLE_ANIM;
+
     private static final int BALL = 128; // dp 无关，直接 px（Demo）
     private static final String CHANNEL_ID = "demo";
     private static final long EXPAND_WATCHDOG_MS = 2500;  // v1.9：扩窗后的最长存活时间
@@ -182,6 +191,8 @@ public class FloatingBallService extends Service {
         mWinDragSlop = Math.round(20 * d);
         mMenuMargin = Math.round(12 * d);
         mMenuGap = Math.round(20 * d);
+        mHandleMode = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getInt("handle_mode", HANDLE_ANIM);
         // 先拿 DisplayManager：refreshMetrics() 优先用它，拿不到再退回 WindowManager
         mDm = (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
         refreshMetrics();
@@ -401,7 +412,19 @@ public class FloatingBallService extends Service {
 
     /** 窗户可见量 = 球位置（球即窗户左缘）。 */
     private void setWinProgress(int amount) {
-        mWin.setTranslationX(Math.max(0, Math.min(mScreenW, mScreenW - amount)));
+        final int reveal = Math.max(0, Math.min(mScreenW, amount));
+        // v1.12.2「跟随窗户」模式：开合动画期间让球跟着窗户左缘一起走，球与窗户永不
+        // 脱钩；观感是"窗户在动、球被它带着"，而不是球自己单独跑一段。
+        if (mHandleMode == HANDLE_FOLLOW && !mDragging && !mGestureActive
+                && mBall != null && mBallLp != null) {
+            mBallLp.x = Math.max(0, Math.min(mScreenW - BALL, mScreenW - reveal));
+            mBall.setTranslationX(0);
+            try {
+                mWm.updateViewLayout(mBall, mBallLp);
+            } catch (Throwable ignore) {
+            }
+        }
+        mWin.setTranslationX(mScreenW - reveal);
     }
 
     // ---------------------------------------------------------------- 球
@@ -708,22 +731,49 @@ public class FloatingBallService extends Service {
     }
 
     /** 窗户全开：球到左缘，窗户铺满。 */
+    /** v1.12.2：把球直接放到指定 x（无动画）。 */
+    private void snapBallTo(int x) {
+        mBallLp.x = Math.max(0, Math.min(mScreenW - BALL, x));
+        mBall.setTranslationX(0);
+        try {
+            mWm.updateViewLayout(mBall, mBallLp);
+        } catch (Throwable ignore) {
+        }
+    }
+
+    /** v1.12.2：按当前把手模式决定"开/关窗时球怎么回到把手位"。 */
+    private void moveBallToHandle(boolean open) {
+        final int dockX = open ? 0 : mScreenW - BALL;
+        switch (mHandleMode) {
+            case HANDLE_ANIM:
+                animBallTo(dockX);      // v1.12 原样：200ms 滑回
+                break;
+            case HANDLE_SNAP:
+                snapBallTo(dockX);      // 瞬间到位
+                break;
+            case HANDLE_FOLLOW:
+            case HANDLE_FREE:
+            default:
+                break;                  // FOLLOW 由 setWinProgress 每帧带着走；FREE 不动
+        }
+    }
+
     private void openWin() {
-        trace("openWin  ballX=" + mBallLp.x);
+        trace("openWin  ballX=" + mBallLp.x + " handle=" + HANDLE_NAMES[mHandleMode]);
         mWinOpen = true;
         if (mWinLp.width == 0) {
             setWinProgress(0);
             setWinActive(true);
         }
-        animBallTo(0);
+        moveBallToHandle(true);
         startWinAnim(mScreenW);
     }
 
-    /** 窗户收回：窗户滑回右墙，球贴右缘；动画结束彻底熄灭窗口（surface 销毁）。 */
+    /** 窗户收回：窗户滑回右墙；动画结束彻底熄灭窗口（surface 销毁）。 */
     private void closeWin() {
-        trace("closeWin ballX=" + mBallLp.x);
+        trace("closeWin ballX=" + mBallLp.x + " handle=" + HANDLE_NAMES[mHandleMode]);
         mWinOpen = false;
-        animBallTo(mScreenW - BALL);
+        moveBallToHandle(false);
         startWinAnim(0);
     }
 
@@ -732,8 +782,9 @@ public class FloatingBallService extends Service {
      * 用于"拉窗手势没过半"的中止——球停在松手处，不做任何自动位移动画。
      */
     private void retractWin() {
-        trace("retractWin ballX=" + mBallLp.x);
+        trace("retractWin ballX=" + mBallLp.x + " handle=" + HANDLE_NAMES[mHandleMode]);
         mWinOpen = false;
+        moveBallToHandle(false);   // v1.12.2：中止路径同样遵循当前把手模式
         startWinAnim(0);
     }
 
@@ -834,6 +885,7 @@ public class FloatingBallService extends Service {
                 {"◀ 模拟返回", "返回上一级（模拟）"},
                 {"□ 模拟多任务", "最近任务（模拟）"},
                 {"✕ 关闭窗户", null},
+                {"↔ 把手： " + HANDLE_NAMES[mHandleMode] + "（点击切换）", "handle"},
                 {"🞂 退出 Demo", "exit"},
         };
         for (final String[] it : items) {
@@ -848,6 +900,8 @@ public class FloatingBallService extends Service {
                     hideMenu();
                     if (it[1] == null) {
                         closeWin();
+                    } else if ("handle".equals(it[1])) {
+                        cycleHandleMode();
                     } else if ("exit".equals(it[1])) {
                         stopSelf();
                     } else {
@@ -902,6 +956,24 @@ public class FloatingBallService extends Service {
         } catch (Throwable t) {
             Toast.makeText(this, "菜单失败: " + t, Toast.LENGTH_SHORT).show();
         }
+    }
+
+    /**
+     * v1.12.2：循环切换把手归位模式并持久化（重启不丢）。
+     *   动画归位 = v1.12 原样（200ms 滑回把手位）
+     *   跟随窗户 = 开合动画期间球跟着窗户左缘走，永不脱钩
+     *   瞬间归位 = 松手即回把手位，没有过程
+     *   不归位   = v1.13 模型（球只跟手）
+     */
+    private void cycleHandleMode() {
+        mHandleMode = (mHandleMode + 1) % HANDLE_NAMES.length;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putInt("handle_mode", mHandleMode).apply();
+        trace("handle mode -> " + HANDLE_NAMES[mHandleMode]);
+        if (mHandleMode == HANDLE_SNAP) {
+            snapBallTo(mWinOpen ? 0 : mScreenW - BALL);   // 立刻给个直观反馈
+        }
+        Toast.makeText(this, "把手模式：" + HANDLE_NAMES[mHandleMode], Toast.LENGTH_SHORT).show();
     }
 
     private void hideMenu() {
