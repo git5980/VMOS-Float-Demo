@@ -85,6 +85,21 @@ public class FloatingBallService extends Service {
     static volatile boolean sRunning = false;   // v1.7：供主界面切换 启动/停止 按钮
 
     /**
+     * v1.11：诊断日志开关。只在真机上定位"球为什么动了"时开，正式使用可关。
+     * 用法：adb-shell "logcat -d -s FloatDemo"
+     * 每条 animBallTo 都会打印"从哪到哪 + 当时的手势/窗口状态"，所以任何一次
+     * 用户没预期的位移，都能在日志里找到是哪个入口发起的。
+     */
+    private static final String TAG = "FloatDemo";
+    private static final boolean TRACE = true;
+
+    private void trace(String s) {
+        if (TRACE) {
+            android.util.Log.d(TAG, s);
+        }
+    }
+
+    /**
      * v1.9 看门狗：拖动会把球窗口扩成全屏，而它此时是可触摸的——一旦
      * updateViewLayout 缩回失败（旧版 7 处 catch(Throwable ignore) 直接吞掉，
      * 无任何补救），就剩一个覆盖全屏、吞掉所有触摸的空窗口，用户只能靠通知栏
@@ -436,6 +451,9 @@ public class FloatingBallService extends Service {
                 if (mMenuEatenOnDown) {
                     hideMenu();
                 }
+                trace("DOWN raw=(" + (int) event.getRawX() + "," + (int) event.getRawY()
+                        + ") ballX=" + mBallLp.x + " ballY=" + mBallLp.y
+                        + " winOpen=" + mWinOpen + " expanded=" + mExpanded);
                 return true;
             case MotionEvent.ACTION_POINTER_DOWN:
                 // v1.5：多指落下=手势作废（防 pointer 0 交换导致坐标突变瞬移），
@@ -571,6 +589,8 @@ public class FloatingBallService extends Service {
         }
         boolean moved = Math.abs(event.getRawX() - mDownX) > mSlop
                 || Math.abs(event.getRawY() - mDownY) > mSlop;
+        trace("UP moved=" + moved + " winDrag=" + mWinDrag + " ballX=" + mBallLp.x
+                + " winOpen=" + mWinOpen);
         settleBall();
         if (mWinDrag) {
             mWinDrag = false;
@@ -610,6 +630,7 @@ public class FloatingBallService extends Service {
         mBall.setTranslationX(0);
         mBall.setTranslationY(0);
         mBall.setAlpha(1f);
+        trace("settle -> x=" + mBallLp.x + " y=" + mBallLp.y + " expanded=" + mExpanded);
         applyBallLayout();
     }
 
@@ -634,6 +655,7 @@ public class FloatingBallService extends Service {
         try {
             mWm.updateViewLayout(mBall, mBallLp);
         } catch (Throwable t) {
+            android.util.Log.w(TAG, "applyBallLayout 失败，挂看门狗重试: " + t);
             mBallLp.width = oldW;    // 回滚：窗口其实还是原样，状态别撒谎
             mBallLp.height = oldH;
             if (wasExpanded) {
@@ -649,6 +671,7 @@ public class FloatingBallService extends Service {
 
     /** 窗户全开：球到左缘，窗户铺满。 */
     private void openWin() {
+        trace("openWin  ballX=" + mBallLp.x);
         mWinOpen = true;
         if (mWinLp.width == 0) {
             setWinProgress(0);
@@ -660,6 +683,7 @@ public class FloatingBallService extends Service {
 
     /** 窗户收回：窗户滑回右墙，球贴右缘；动画结束彻底熄灭窗口（surface 销毁）。 */
     private void closeWin() {
+        trace("closeWin ballX=" + mBallLp.x);
         mWinOpen = false;
         animBallTo(mScreenW - BALL);
         startWinAnim(0);
@@ -670,6 +694,7 @@ public class FloatingBallService extends Service {
      * 用于"拉窗手势没过半"的中止——球停在松手处，不做任何自动位移动画。
      */
     private void retractWin() {
+        trace("retractWin ballX=" + mBallLp.x);
         mWinOpen = false;
         startWinAnim(0);
     }
@@ -700,6 +725,8 @@ public class FloatingBallService extends Service {
 
             @Override
             public void onAnimationEnd(android.animation.Animator animation) {
+                trace("winAnim end target=" + targetAmount + " winOpen=" + mWinOpen
+                        + " cancelled=" + cancelled[0] + " ballX=" + mBallLp.x);
                 if (!cancelled[0] && !mWinOpen) {
                     setWinActive(false);
                 }
@@ -718,6 +745,9 @@ public class FloatingBallService extends Service {
     }
 
     private void animBallTo(final int targetX) {
+        trace("animBallTo " + mBallLp.x + " -> " + targetX
+                + " winOpen=" + mWinOpen + " gesture=" + mGestureActive
+                + " dragging=" + mDragging + " expanded=" + mExpanded);
         if (mBallAnim != null) {
             mBallAnim.cancel();
             mBallAnim = null;

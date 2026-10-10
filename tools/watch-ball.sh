@@ -21,7 +21,10 @@ PKG="${3:-dev.twinbox.floatdemo}"
 ADB="/root/dsh-bin/adb-shell"
 
 end=$(( $(date +%s) + DUR ))
-echo "# 采样 ${DUR}s / 每 ${IV}s，包名 $PKG"
+ver=$("$ADB" "dumpsys package $PKG" 2>/dev/null | tr -d '\r' \
+      | awk '/versionCode=/{vc=$1} /versionName=/{vn=$1} END{print vc" "vn}')
+echo "# 采样 ${DUR}s / 每 ${IV}s，包名 $PKG（安装版本：${ver:-未知}）"
+echo "# 起手参考：球窗口 128×128 应为 frame=[952,792][1080,920]（1080×2376 屏）"
 while [ "$(date +%s)" -lt "$end" ]; do
   ts=$(date +%H:%M:%S.%3N)
   "$ADB" "dumpsys window windows" 2>/dev/null | tr -d '\r' | awk -v ts="$ts" -v pkg="$PKG" '
