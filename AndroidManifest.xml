@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.twinbox.floatdemo"
+    android:versionCode="10"
+    android:versionName="1.9">
+
+    <!-- v1.9：minSdk 24 与代码里的 API 26 调用终于对齐了（NotificationChannel
+         已加版本分支，见 FloatingBallService.buildNotification）。
+         targetSdk 保持 28：这是真机验证过的组合。升级路线（改完再升，别直接跳）：
+           31+：android:exported（已有）、PendingIntent mutability（已有）；
+           33+：通知需要运行时请求 POST_NOTIFICATIONS；
+           34+：前台服务必须声明 foregroundServiceType + 对应权限（下面已预置）。 -->
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="28" />
+
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- v1.9 前瞻声明：targetSdk 升到 34 后，前台服务必须声明类型与对应权限。
+         在 targetSdk < 34 的设备上该声明不参与强制校验，不影响现有行为。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- v1.9 前瞻声明：targetSdk 升到 33 后，通知还需运行时请求才能显示（目前不需要）。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="VMOS浮窗Demo"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <service
+            android:name=".FloatingBallService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse" />
+    </application>
+</manifest>

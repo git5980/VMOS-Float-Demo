@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v1.9 新增：桌面图标。旧版 manifest 没有 android:icon，装完是系统默认灰图标。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
+    <solid android:color="#FF101B2E" />
+    <stroke android:width="3dp" android:color="#FF5B8CFF" />
+</shape>

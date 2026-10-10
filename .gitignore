@@ -1,0 +1,6 @@
+# v1.9 新增：这个工程之前完全没有版本控制，版本只存在于 manifest 和注释里。
+build/
+*.apk
+*.keystore
+*.jks
+*.log
