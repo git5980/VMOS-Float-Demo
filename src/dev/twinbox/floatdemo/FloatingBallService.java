@@ -79,6 +79,7 @@ public class FloatingBallService extends Service {
     private boolean mWinOpen;
     private boolean mMenuEatenOnDown;       // v1.2：本手势按下时是否已吸收关闭过菜单
     private boolean mExpanded;              // v1.5：拖动中球窗口是否已扩成全屏（防 translation 被裁剪）
+    private boolean mBallWindowAtOrigin;    // v1.15：扩窗时窗口原点是否已搬到 (0,0)（此时 translation = 绝对屏幕坐标）
     private boolean mDeadGesture;           // v1.7：多指污染的手势（后续 MOVE 忽略，UP 只复位）
     private boolean mGestureActive;         // v1.9：手指仍按着（含未起拖/死亡手势），自动同步必须让位
     private android.animation.ValueAnimator mWinAnim;  // v1.2：窗户展开量动画（可打断）
@@ -150,7 +151,7 @@ public class FloatingBallService extends Service {
                 mHandler.postDelayed(this, 1000);
                 return;
             }
-            applyBallLayout();                   // 失败时内部会自己排下一次重试
+            settleBall();                        // 失败时内部会自己排下一次重试
         }
     };
 
@@ -260,8 +261,13 @@ public class FloatingBallService extends Service {
         // 球：把显示位折叠回 LP 并 clamp 进新屏（旋转后可能整个在屏外），不主动挪位（保持 v1.8 语义）
         mBallLp.width = mExpanded ? mScreenW : BALL;
         mBallLp.height = mExpanded ? mScreenH : BALL;
-        mBallLp.x = Math.max(0, Math.min(mScreenW - BALL, mBallLp.x + (int) mBall.getTranslationX()));
-        mBallLp.y = Math.max(0, Math.min(mScreenH - BALL, mBallLp.y + (int) mBall.getTranslationY()));
+        if (mBallWindowAtOrigin) {
+            mBallLp.x = clampBallX((int) mBall.getTranslationX());
+            mBallLp.y = clampBallY((int) mBall.getTranslationY());
+        } else {
+            mBallLp.x = clampBallX(mBallLp.x + (int) mBall.getTranslationX());
+            mBallLp.y = clampBallY(mBallLp.y + (int) mBall.getTranslationY());
+        }
         mBall.setTranslationX(0);
         mBall.setTranslationY(0);
         mBall.setAlpha(1f);
@@ -425,6 +431,11 @@ public class FloatingBallService extends Service {
         return Math.max(0, Math.min(mScreenW - BALL, x));
     }
 
+    /** 球的 y 同理，保证上下拖动时球也始终完整可见。 */
+    private int clampBallY(int y) {
+        return Math.max(0, Math.min(mScreenH - BALL, y));
+    }
+
     /** 直接摆球的 x（无动画），用于"窗户带着球走"。 */
     private void setBallX(int x) {
         mBallLp.x = clampBallX(x);
@@ -505,7 +516,7 @@ public class FloatingBallService extends Service {
                 mWinDrag = false;
                 mDeadGesture = false;
                 mGestureActive = true;   // v1.9：手势期间禁止窗口动画自动同步球
-                // 注意：这里不再写 mExpanded=false——它由 applyBallLayout()
+                // 注意：这里不再写 mExpanded=false——它由 settleBall()
                 // 在"缩回真的成功"时才清，否则会把失败的窗口状态抹成已缩回。
                 // v1.2 修"要再点一下才行"：菜单若盖着球，触摸全被菜单窗口吃掉
                 // （球收不到事件）。按下球即关菜单；标记"本手势已吸收菜单"，
@@ -542,17 +553,23 @@ public class FloatingBallService extends Service {
                 if (!mDragging) {
                     return true;
                 }
-                // v1.5 修"上下移动球消失"：球窗口只有 BALL×BALL，translation
-                // 超出窗口 surface 的部分会被裁剪——旧版往下拖 >128px 球就完全
-                // 移出窗口="消失"；松手结算 lp 又"闪现"。修法：拖动一开始就把
-                // 窗口扩成全屏（原点不动，视觉零跳变，仅此一次 binder），
-                // 之后 translation 在全屏 surface 内随便移、永不裁剪、仍零 binder。
+                // v1.15 修"往左拖球消失"：旧版扩窗时**窗口原点留在球的旧位置**，
+                // 画布只覆盖 [原点, 原点+全屏]，往左/往上拖时球面被画到负的局部坐标
+                // ——落到画布外，被裁掉 = 消失（往右/往下是正方向，所以只有左/上会消失）。
+                // 现在把窗口原点搬到 (0,0)，translation 改用**绝对屏幕坐标**：
+                // 整块屏幕都是画布，四个方向都不会被裁。
                 if (!mExpanded) {
                     mExpanded = true;
+                    mBallWindowAtOrigin = true;
+                    mBallLp.x = 0;
+                    mBallLp.y = 0;
                     mBallLp.width = mScreenW;
                     mBallLp.height = mScreenH;
                     try {
                         mWm.updateViewLayout(mBall, mBallLp);
+                        // 原点变了，立刻用绝对坐标把球摆回原处，视觉零跳变
+                        mBall.setTranslationX(mStartX);
+                        mBall.setTranslationY(mStartY);
                         // v1.9：扩窗后挂看门狗。全屏窗口是可触摸的，一旦缩回失败
                         // （异常被吞、进程卡住、手势永远收不到 UP），整屏触摸就没了。
                         mHandler.removeCallbacks(mBallLayoutWatchdog);
@@ -560,6 +577,7 @@ public class FloatingBallService extends Service {
                     } catch (Throwable t) {
                         // 扩窗失败不影响跟手（球仍在 BALL×BALL 窗口里，只是会被裁剪）
                         mExpanded = false;
+                        mBallWindowAtOrigin = false;
                     }
                 }
                 // v1.3 修"先往下拖一下再拉，窗户没反应"：方向判定不能只在跨越
@@ -596,26 +614,21 @@ public class FloatingBallService extends Service {
                         mWinAnim.cancel();
                         mWinAnim = null;
                     }
-                    // v1.14：球 = 窗户左缘，跟手（translation 零 binder）。
-                    // x 夹在"整个球都在屏内"，旧版夹到屏宽−8 会让球被推出屏外=看起来消失。
+                    // v1.15：窗口原点在 (0,0)，translation 直接用绝对屏幕坐标。
                     int nx = clampBallX(mStartX + (int) dx);
+                    int ny = clampBallY(mStartY + (int) dy);
                     if (mWinLp.width == 0) {
                         // 拉出首帧：先摆好 translation 再点亮，防全屏内容闪现一帧
                         setWinProgress(mScreenW - nx);
                         setWinActive(true);
                     }
-                    // v1.14：拉窗时也允许上下移动（用户要求：拖动时球能上下走）
-                    int ty = (int) Math.max(-mStartY,
-                            Math.min(mScreenH - BALL - mStartY, dy));
-                    mBall.setTranslationX(nx - mStartX);
-                    mBall.setTranslationY(ty);
+                    mBall.setTranslationX(nx);
+                    mBall.setTranslationY(ny);
                     setWinProgress(mScreenW - nx);
                 } else {
-                    // 自由移动（clamp 屏内；窗口已扩全屏，永不裁剪）
-                    int tx = (int) Math.max(-mStartX, Math.min(mScreenW - BALL - mStartX, dx));
-                    int ty = (int) Math.max(-mStartY, Math.min(mScreenH - BALL - mStartY, dy));
-                    mBall.setTranslationX(tx);
-                    mBall.setTranslationY(ty);
+                    // 自由移动：clamp 屏内后直接用绝对屏幕坐标（窗口原点在 (0,0)）
+                    mBall.setTranslationX(clampBallX(mStartX + (int) dx));
+                    mBall.setTranslationY(clampBallY(mStartY + (int) dy));
                 }
                 mBall.setAlpha(0.55f);
                 return true;
@@ -684,52 +697,49 @@ public class FloatingBallService extends Service {
     }
 
     /** 结算：显示位写回 LP + 窗口缩回 BALL×BALL + translation 归零（一次 binder）。 */
-    private void settleBall() {
-        mBallLp.x = mBallLp.x + (int) mBall.getTranslationX();
-        mBallLp.y = mBallLp.y + (int) mBall.getTranslationY();
-        mBall.setTranslationX(0);
-        mBall.setTranslationY(0);
-        mBall.setAlpha(1f);
-        trace("settle -> x=" + mBallLp.x + " y=" + mBallLp.y + " expanded=" + mExpanded);
-        applyBallLayout();
-    }
-
     /**
-     * v1.9：把 mBallLp 一次性推到 WMS（位置 + 尺寸），并保证拖动期扩成的
-     * 全屏窗口一定缩回 BALL×BALL——它是"全屏可触摸窗口"的唯一出口。
+     * 结算：把"球的显示位"折进 LP、窗口缩回 BALL×BALL，translation 归零。
      *
-     * 旧版这里 `catch (Throwable ignore)` 把缩回失败直接吞掉：一旦失败就永久留下
-     * 一个覆盖全屏、吞掉所有触摸的空窗口（用户只能靠通知栏回来停服务）。现在失败
-     * 会回滚尺寸（不撒谎）、保留 mExpanded，并挂看门狗重试到成功为止。
-     *
-     * 注意：无论是否处于扩展态都要推一次——settle 会把 translation 折进 lp.x/y，
-     * 那次位置变更同样需要 updateViewLayout 才生效。
-     *
-     * @return 是否确认推送成功
+     * v1.15：坐标系有两种状态——
+     *   拖动中（mBallWindowAtOrigin）：窗口原点在 (0,0)，translation 就是绝对屏幕坐标 → 直接赋值；
+     *   未扩窗（异常/极短手势）：窗口原点还在球上，translation 是偏移 → 叠加。
+     * 推送失败时会**把内存状态和真实窗口一起回滚**（保持两者一致），并挂看门狗重试；
+     * 成功后才清 translation/尺寸标志，所以不会出现"球闪到左上角"这类脏状态。
      */
-    private boolean applyBallLayout() {
-        final boolean wasExpanded = mExpanded;
+    private void settleBall() {
+        final int dispX = mBallWindowAtOrigin
+                ? clampBallX((int) mBall.getTranslationX())
+                : clampBallX(mBallLp.x + (int) mBall.getTranslationX());
+        final int dispY = mBallWindowAtOrigin
+                ? clampBallY((int) mBall.getTranslationY())
+                : clampBallY(mBallLp.y + (int) mBall.getTranslationY());
+        final int oldX = mBallLp.x, oldY = mBallLp.y;
         final int oldW = mBallLp.width, oldH = mBallLp.height;
+        mBallLp.x = dispX;
+        mBallLp.y = dispY;
         mBallLp.width = BALL;
         mBallLp.height = BALL;
         try {
             mWm.updateViewLayout(mBall, mBallLp);
         } catch (Throwable t) {
-            android.util.Log.w(TAG, "applyBallLayout 失败，挂看门狗重试: " + t);
-            mBallLp.width = oldW;    // 回滚：窗口其实还是原样，状态别撒谎
+            android.util.Log.w(TAG, "settle 推送失败，回滚并重试: " + t);
+            mBallLp.x = oldX;
+            mBallLp.y = oldY;
+            mBallLp.width = oldW;
             mBallLp.height = oldH;
-            if (wasExpanded) {
-                mHandler.removeCallbacks(mBallLayoutWatchdog);
-                mHandler.postDelayed(mBallLayoutWatchdog, SHRINK_RETRY_MS);
-            }
-            return false;
+            mHandler.removeCallbacks(mBallLayoutWatchdog);
+            mHandler.postDelayed(mBallLayoutWatchdog, SHRINK_RETRY_MS);
+            return;
         }
+        mBall.setTranslationX(0);
+        mBall.setTranslationY(0);
+        mBall.setAlpha(1f);
         mExpanded = false;
+        mBallWindowAtOrigin = false;
         mHandler.removeCallbacks(mBallLayoutWatchdog);
-        return true;
+        trace("settle -> x=" + mBallLp.x + " y=" + mBallLp.y);
     }
 
-    /** 窗户全开：球到左缘，窗户铺满。 */
     /**
      * 窗户全开：露出量动画到满屏，球被窗户左缘带着走到左缘（x=0）。
      * v1.14：球没有任何独立动画，它的位置完全由窗户露出量决定（两者绑死）。
@@ -738,7 +748,10 @@ public class FloatingBallService extends Service {
         trace("openWin  ballX=" + mBallLp.x);
         mWinOpen = true;
         if (mWinLp.width == 0) {
-            setWinProgress(0);
+            // 兜底路径（正常流程里拉窗首帧已经点亮过窗口）。
+            // v1.15：这里直接摆窗户的 translation，不走 setWinProgress——
+            // 否则"由露出量反推球的 x"会把球瞬移到右缘，凭空多出一段位移。
+            mWin.setTranslationX(mScreenW);
             setWinActive(true);
         }
         startWinAnim(mScreenW);
