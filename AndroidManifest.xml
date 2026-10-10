@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="dev.twinbox.floatdemo"
-    android:versionCode="12"
-    android:versionName="1.11">
+    android:versionCode="13"
+    android:versionName="1.12">
 
     <!-- v1.9：minSdk 24 与代码里的 API 26 调用终于对齐了（NotificationChannel
          已加版本分支，见 FloatingBallService.buildNotification）。

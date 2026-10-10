@@ -86,16 +86,42 @@ public class FloatingBallService extends Service {
 
     /**
      * v1.11：诊断日志开关。只在真机上定位"球为什么动了"时开，正式使用可关。
-     * 用法：adb-shell "logcat -d -s FloatDemo"
-     * 每条 animBallTo 都会打印"从哪到哪 + 当时的手势/窗口状态"，所以任何一次
-     * 用户没预期的位移，都能在日志里找到是哪个入口发起的。
+     * 日志同时走 Log.d（tag FloatDemo）与**外部文件落盘**——实测 OnePlus / ColorOS
+     * (Android 16) 会把第三方应用的应用级日志吞掉，logcat 里一条都看不到，
+     * 所以真正的证据在文件里：
+     *   /sdcard/Android/data/dev.twinbox.floatdemo/files/trace.log
+     * 取法：adb-shell "cat /sdcard/Android/data/dev.twinbox.floatdemo/files/trace.log"
      */
     private static final String TAG = "FloatDemo";
     private static final boolean TRACE = true;
+    private static final String TRACE_FILE = "trace.log";
+    private static final long TRACE_MAX = 512 * 1024;   // 超过就轮转成 trace.log.1
+    private final java.text.SimpleDateFormat mTimeFmt =
+            new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US);
 
     private void trace(String s) {
-        if (TRACE) {
-            android.util.Log.d(TAG, s);
+        if (!TRACE) {
+            return;
+        }
+        android.util.Log.d(TAG, s);
+        try {
+            java.io.File dir = getExternalFilesDir(null);
+            if (dir == null) {
+                return;
+            }
+            java.io.File f = new java.io.File(dir, TRACE_FILE);
+            if (f.length() > TRACE_MAX) {
+                java.io.File old = new java.io.File(dir, TRACE_FILE + ".1");
+                if (old.exists()) {
+                    old.delete();
+                }
+                f.renameTo(old);
+            }
+            java.io.FileWriter w = new java.io.FileWriter(f, true);
+            w.write(mTimeFmt.format(new java.util.Date()) + " " + s + "\n");
+            w.close();
+        } catch (Throwable ignore) {
+            // 日志失败绝不能影响功能
         }
     }
 
@@ -165,6 +191,18 @@ public class FloatingBallService extends Service {
         startForeground(9, buildNotification());
         buildWindow();
         buildBall();
+        // v1.12：会话分隔线，便于在追加式日志里切分"这一次启动到下一次启动"
+        trace("=== start v" + appVersion() + " screen=" + mScreenW + "x" + mScreenH
+                + " density=" + d + " slop=" + mSlop + " dragSlop=" + mWinDragSlop);
+    }
+
+    /** v1.12：日志里记版本号，免得对不上装的哪一版。 */
+    private String appVersion() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Throwable t) {
+            return "?";
+        }
     }
 
     /** v1.9：从 DisplayManager 取真实屏幕尺寸（含系统栏），旋转/折叠后也准。 */
