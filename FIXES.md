@@ -75,13 +75,25 @@ Verified using v2 scheme (APK Signature Scheme v2): true
 Verified using v3 scheme (APK Signature Scheme v3): true
 ```
 
-- 产物：`build/VMOS-Float-Demo.apk`（25 KB，package `dev.twinbox.floatdemo`，versionCode 11 / 1.10，minSdk 24 / targetSdk 28）
+- 产物：`build/VMOS-Float-Demo.apk`（25 KB，package `dev.twinbox.floatdemo`，versionCode 13 / 1.12，minSdk 24 / targetSdk 28）
 - dex 内含 `MainActivity` / `FloatingBallService` / `VmScreenView` / `R` 系列
 - manifest 校验：图标、`foregroundServiceType=specialUse`、四个权限均按预期落地
 - `zipalign -c -v 4` 校验通过
-- 真机状态：手机已装 versionCode 10 / 1.9（本次 v1.10 与原 v1.8 无关，是同一把新签名库签的，可直接覆盖安装）
 
-**未验证（需要真机操作反馈）**：手势手感、"半开窗户下方触摸穿透"——容器里没有屏幕，只能静态推导。
+**真机验证（OnePlus PKR110 / Android 16，v1.12 实测，证据见 `docs/evidence/`）**：
+
+- 20 秒会话：16 次按下、其中 8 次拉/收窗手势；**球的自动位移动画只有 4 次，全部紧跟 `openWin`/`closeWin`**
+  （用户明确的开关窗动作），缩回失败告警 0 次。
+- 同一段操作里，v1.9 的那条"球回把手位"同步**本该动球 11 次**（含用户描述的
+  "右半屏左拖一点点松手后球滑回右缘"：`settle x=851` → v1.9 会 851→952，v1.12 不动）。
+  11 次全部没有发生 → 用户反馈的 bug 确认修复。
+- 仍属"设计内动画"的两处：拉窗过半 → 球滑到左缘；收窗过半/点球收回 → 球滑回右缘。
+
+**未验证**：手势手感（主观）、"半开窗户下方触摸穿透"（需要交互观察）——容器里没有屏幕。
+
+**诊断开关**：`FloatDemoService.TRACE` 默认 true，会把 trace 写到
+`/sdcard/Android/data/dev.twinbox.floatdemo/files/trace.log`；不需要时改成 `false` 即可
+（本机 ColorOS 会吞掉应用级 `Log.d`，所以只能落盘）。
 
 ## 签名说明
 
