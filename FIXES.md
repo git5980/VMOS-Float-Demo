@@ -1,9 +1,23 @@
-# v1.9 修复报告
+# 修复报告（v1.9 → v1.10）
 
 基线：`VMOS-Float-Demo-v1.8-source`（versionCode 9 / 1.8）
-结果：versionCode 10 / **1.9**，已编译通过并产出签名 APK。
+结果：versionCode 11 / **1.10**，已编译通过并产出签名 APK。
 
-## 一、修复清单
+## v1.10（真机反馈修复）
+
+真机反馈：**悬浮球在拖动结束后还会自己出现一段移动动画**。这是 v1.9 引入的回归，
+两条路径都会在"用户没有开/关窗意图"时动画移动球：
+
+| # | 根因 | 修法 | 位置 |
+|---|---|---|---|
+| A | v1.8 的"球回把手位"自动同步：窗户动画收尾时若球不在把手位就把球 `animBallTo` 过去。v1.9 把 `mBallAnim` 句柄复位后，这段原本失效的代码被**激活**了 | 整段删除。它要修的"球与窗户左缘脱钩"其实无害：窗户全开时球的 x 不参与几何计算，点球/右拉收窗都会把球带回把手位（自愈） | `FloatingBallService.java:679` |
+| B | 拉窗没过半的中止路径走的是 `closeWin()`，它会把球动画滑回右缘。v1.9 把拉窗入口放宽到"球在右半屏"后，**一次普通的水平拖球**也会被当成拉窗 → 每次松手球都自己滑一次 | 新增 `retractWin()`：只把窗户缩回去，球停在松手处 | `:582`、`:666` |
+
+修完后的不变量：**只有"用户明确开窗 / 关窗"两条路径会动画移动球**
+（`openWin()` → 球到左缘；`closeWin()` → 球到右缘，由"拉窗过半""点球一键收回""菜单关闭窗户"触发）；
+其余任何情况球都停在松手处。`animBallTo` 的调用点已收敛到这两处。
+
+## v1.9（首轮，11 类问题）
 
 | # | 级别 | 问题（v1.8） | 修法 | 位置 |
 |---|---|---|---|---|
@@ -25,7 +39,9 @@
 - 悬浮球尺寸 `BALL=128px` 未 dp 化：这是作者调过的手感值，不属于缺陷，改动会改变观感。
 - overlay "不消费则穿透下层" 依赖系统既定行为，未改造（改造需要每帧 binder，违背零 binder 设计）。
 
-## 二、验证
+> 表中行号是各自修改当时的快照；v1.10 之后文件行号有位移。
+
+## 验证
 
 ```
 $ ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh
@@ -38,18 +54,20 @@ Verified using v2 scheme (APK Signature Scheme v2): true
 Verified using v3 scheme (APK Signature Scheme v3): true
 ```
 
-- 产物：`build/VMOS-Float-Demo.apk`（25 KB，package `dev.twinbox.floatdemo`，versionCode 10 / 1.9，minSdk 24 / targetSdk 28）
+- 产物：`build/VMOS-Float-Demo.apk`（25 KB，package `dev.twinbox.floatdemo`，versionCode 11 / 1.10，minSdk 24 / targetSdk 28）
 - dex 内含 `MainActivity` / `FloatingBallService` / `VmScreenView` / `R` 系列
 - manifest 校验：图标、`foregroundServiceType=specialUse`、四个权限均按预期落地
 - `zipalign -c -v 4` 校验通过
+- 真机状态：手机已装 versionCode 10 / 1.9（本次 v1.10 与原 v1.8 无关，是同一把新签名库签的，可直接覆盖安装）
 
-**未验证（需要真机）**：手势手感与"半开窗户下方触摸穿透"——容器里没有屏幕，只能静态推导。
+**未验证（需要真机操作反馈）**：手势手感、"半开窗户下方触摸穿透"——容器里没有屏幕，只能静态推导。
 
-## 三、注意：签名不兼容
+## 签名说明
 
-APK 用的是本次新建的签名库 `build/twinbox.keystore`（口令取自 `KS_PASS`，默认值仅供本地调试）。
-原 v1.8 是用 `/home/z/my-project/vmclone/twinbox2/build/twinbox.keystore` 签的，两者不同，
-**新包无法覆盖安装已装的旧版**。要覆盖安装请在有原签名库的机器上：
+- v1.9 / v1.10 用的是新建签名库 `build/twinbox.keystore`（口令取自 `KS_PASS`，默认值仅供本地调试）；
+  手机上现在装的 1.9 就是这把钥匙签的，所以 **v1.10 可以直接覆盖安装**。
+- 最初的 v1.8 是 `/home/z/my-project/vmclone/twinbox2/build/twinbox.keystore` 签的。
+  若以后要回到原来的签名身份（例如与 `dev.twinbox.app` 双生盒共用签名），请在有原签名库的机器上：
 
 ```bash
 KS=/home/z/my-project/vmclone/twinbox2/build/twinbox.keystore KS_PASS=<原口令> ./build.sh

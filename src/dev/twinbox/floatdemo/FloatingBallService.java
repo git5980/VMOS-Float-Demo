@@ -43,6 +43,12 @@ import android.widget.Toast;
  *  - mBallAnim 跑完不复位为 null，"球回把手位"同步逻辑成死代码，真触发时抢手势；
  *  - 屏幕尺寸只在 onCreate 取一次，旋转/折叠后所有几何失效；
  *  - 手势阈值与菜单用硬编码 px（高 DPI 上过小）。
+ *
+ * v1.10 修复（用户反馈"拖动结束后球又出现位移动画"）：
+ *  - 删掉 v1.8 的"球回把手位"自动同步（v1.9 复位动画句柄后它被激活了，
+ *    会在窗户动画收尾时无用户意图地挪球）；
+ *  - 拉窗没过半的中止路径改为 retractWin()（只收窗不动球），不再 closeWin()。
+ *  ⇒ 现在只有"用户明确开窗/关窗"这两条路径会动画移动球，其余情况球一律停在松手处。
  */
 public class FloatingBallService extends Service {
 
@@ -570,8 +576,16 @@ public class FloatingBallService extends Service {
             mWinDrag = false;
             if (mBallLp.x < mScreenW / 2) {
                 openWin();
+            } else if (mWinOpen) {
+                closeWin();      // 收窗手势过半：窗户全收，把手（球）贴回右缘
             } else {
-                closeWin();
+                // v1.10 修"拖动结束后球自己滑一下"：拉窗没过半的中止路径。
+                // v1.8 这里走的是 closeWin()，它会 animBallTo(右缘)——球从松手位置
+                // 动画滑回右缘；v1.9 把拉窗入口放宽到"球在右半屏"之后，一次普通的
+                // 水平拖球也会被当成拉窗，于是每次松手都看到球自己滑一次。
+                // 中止就该只是"把窗户缩回去"，球停在松手处（与 v1.8 定的
+                // "拖到位就是到位"一致）。
+                retractWin();
             }
             return true;
         }
@@ -651,6 +665,15 @@ public class FloatingBallService extends Service {
         startWinAnim(0);
     }
 
+    /**
+     * v1.10：只把窗户缩回去，**不动球**。
+     * 用于"拉窗手势没过半"的中止——球停在松手处，不做任何自动位移动画。
+     */
+    private void retractWin() {
+        mWinOpen = false;
+        startWinAnim(0);
+    }
+
     /** 窗户展开量动画（amount: 0=全收, screenW=全开）。存字段便于按下时打断。 */
     private void startWinAnim(int targetAmount) {
         if (mWinAnim != null) {
@@ -680,22 +703,14 @@ public class FloatingBallService extends Service {
                 if (!cancelled[0] && !mWinOpen) {
                     setWinActive(false);
                 }
-                // v1.8 修"球和窗户左缘脱钩"：完成动画把窗户滑到位，但球可能被用户
-                // 拖去了别处（如收窗中途按住球上移再松手）——收尾时把球同步回把手位：
-                // 全开=左缘，全收=右缘。
-                // v1.9 修两处：① 原判据 mBallAnim == null 永远不成立（animBallTo 跑完
-                // 不复位句柄），这段同步其实是死代码；② 一旦成立又可能与"手指正按着
-                // 球"的手势抢球（DOWN 会 cancel/nulling 掉动画，此时用户按住不动，
-                // 220ms 后动画结束就把球从手指底下动画走，且 mDownX/mStartX 没跟着更新，
-                // 后续 MOVE 的 dx 会跳变）。故补上手势守卫，并靠 animBallTo 复位句柄
-                // 让这段逻辑真正生效。
-                if (!cancelled[0] && mBallAnim == null && !mGestureActive
-                        && !mDragging && mBallLp.width == BALL) {
-                    int handleX = mWinOpen ? 0 : mScreenW - BALL;
-                    if (mBallLp.x != handleX) {
-                        animBallTo(handleX);
-                    }
-                }
+                // v1.10 删掉 v1.8 的"球回把手位"自动同步（原样保留在 git 历史里）。
+                // 它的本意是修"球和窗户左缘脱钩"，但代价是：只要窗户动画收尾时球不在
+                // 把手位，球就会**在没有用户意图的情况下自己滑一段**——v1.9 把
+                // mBallAnim 句柄复位后这段死代码被激活，表现就是"拖动结束后球又动了
+                // 一下"（正是 v1.8 当初想消掉的毛病）。而它要修的那个脱钩其实无害：
+                // 窗户全开时球的 x 不参与任何几何计算，点球/右拉收窗都会重新把球带回
+                // 把手位，属于自愈状态。所以这里彻底不做自动移动——球只在
+                // openWin/closeWin 这两个"用户明确开/关窗"的入口被动画移动到把手位。
             }
         });
         mWinAnim = a;
@@ -720,8 +735,9 @@ public class FloatingBallService extends Service {
                 }
             }
         });
-        // v1.9：跑完/被打断都要复位句柄。否则 mBallAnim 的语义变成"曾经启动过动画"，
-        // 上面 onAnimationEnd 里的 `mBallAnim == null`（球动画是否在跑）永远为假。
+        // v1.9：跑完/被打断都要复位句柄——否则 mBallAnim 的语义会退化成
+        // "曾经启动过动画"，DOWN/MOVE 里的 `mBallAnim != null 就 cancel` 会误判，
+        // 也会让"球动画是否在跑"这个判断永远为真。
         a.addListener(new android.animation.AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(android.animation.Animator animation) {
