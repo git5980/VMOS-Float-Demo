@@ -24,7 +24,7 @@ import android.widget.Toast;
  *  - **窗户与球绑死**：窗户左缘 = 球的左边，露出量 = 屏宽 − 球的 x；
  *  - 球跟手拖动（拖动中半透明），**可上下移动**；球被限制在完全可见范围内，
  *    永不出现"被推出屏外/被裁剪=消失"；
- *  - 球在右半屏向左拖 → 窗户跟手拉出（内容实时渲染）；过半松手全开、
+ *  - 球在右半屏向左拖（含斜拖）→ 窗户跟手拉出（内容实时渲染）；过半松手全开、
  *    不足收回——两种情况都是**窗户带着球走**，球不会自己单独跑一段；
  *  - 窗户开着时向右拖 → 窗户收回（跟手），过半=全收；
  *  - 点球：窗户开着=一键收回（窗户合、球随边缘回右缘）；没开=弹菜单。
@@ -51,6 +51,10 @@ import android.widget.Toast;
  *    会在窗户动画收尾时无用户意图地挪球）；
  *  - 拉窗没过半的中止路径改为 retractWin()（只收窗不动球），不再 closeWin()。
  *  ⇒ 现在只有"用户明确开窗/关窗"这两条路径会动画移动球，其余情况球一律停在松手处。
+ *
+ * v1.17 修复（斜拖不生效）：
+ *  - 去掉 v1.4 的"横向主导 |dx|>|dy|"门槛——窗户露出量既然是球 x 的函数，
+ *    斜着拖也必须让窗户出现并跟手；门槛只保留横向位移 ≥20dp，防抖动误触发。
  *
  * v1.14 修复（按用户明确规格重做绑定关系）：
  *  - 球为主动方：窗户露出量 = 屏宽 − 球的 x（球即窗户左缘，两者绑死）；
@@ -166,7 +170,10 @@ public class FloatingBallService extends Service {
         // v1.9：手势门槛与菜单留白改成 dp 换算——旧版固定 20px/16px 在 xxhdpi 上
         // 只有 ~7dp，竖拖时一点横向抖动就被抓进窗户模式（v1.4 那个回归的根因）。
         float d = getResources().getDisplayMetrics().density;
-        mWinDragSlop = Math.round(20 * d);
+        // v1.17：进入"窗户模式"的横向门槛 = 系统 touchSlop（约 8dp）。
+        // 露出量是球 x 的**绝对函数**，门槛越大，"门槛以下的横向漂移"就会让
+        // 球 x ≠ 窗户左缘，下次进模式时表现为跳变；收到 touchSlop 后误差 ≤ 8dp。
+        mWinDragSlop = mSlop;
         mMenuMargin = Math.round(12 * d);
         mMenuGap = Math.round(20 * d);
         // 先拿 DisplayManager：refreshMetrics() 优先用它，拿不到再退回 WindowManager
@@ -523,24 +530,16 @@ public class FloatingBallService extends Service {
                 // 也不跟手，还得松手贴左缘后再拖第二次才出来。改为持续判定：
                 // 本手势未进窗户模式前，每次 MOVE 重新判；一旦切入不再退出。
                 if (!mWinDrag) {
-                    // v1.4 修"移动悬浮球变得困难"（v1.3 回归）：持续重判把移动球也
-                    // 劫持了——贴右缘起步时任何 >20px 左漂（竖拖的横向抖动、斜
-                    // 拖）都被抓进窗户模式。入口再加两道门：
-                    // 1) 横向主导：|dx|>|dy| 才算拉窗。竖直/陡斜拖动=移动球；
-                    //    弧线手势（先下后左）进入左拉段后 |dx| 必然反超 |dy|，
-                    //    照样能拉出窗户，两不误。
-                    // 2) dockedLeft 只认 mWinOpen：球停在左缘但窗户关着时往右拖
-                    //    =移动球，不再被误判成"收窗"闪出近乎全屏的窗户。
-                    // v1.9 修 v1.8 的断链：v1.8 删掉松手贴边后，球可以停在屏幕任意处，
-                    // 而"必须贴右缘 16px 内"的旧判据让球停在中间/左半屏时就再也拉不出
-                    // 窗户了（得先手动把球拖回右缘）。几何上"球即窗户左缘"，球在右半屏
-                    // 向左拉一定拉得出窗户（只是露出量小），故改为半屏判据；同时把固定
-                    // 20px 门槛换成 20dp——旧值在 xxhdpi 上只有 ~7dp，太容易误触发。
-                    boolean horizDom = Math.abs(dx) > Math.abs(dy);
+                    // v1.17 去掉"横向主导"门槛（v1.4 的 |dx|>|dy|）。
+                    // 那个门槛属于"球可自由移动、窗户只在横拖时介入"的旧模型；现在窗户
+                    // 露出量本来就是球 x 的函数，球横向一动窗户就该跟着出现——斜着拖
+                    // （竖直分量更大）也必须生效，否则球会离开右缘而窗户不出现、松手
+                    // 也不归位（用户实测 bug）。只保留横向位移 ≥20dp 作为进入门槛，
+                    // 避免手指抖动误触发（门槛 = 系统 touchSlop）。
                     boolean canOpen = !mWinOpen && mStartX >= mScreenW / 2;
                     boolean canClose = mWinOpen;
-                    if (horizDom && ((canOpen && dx < -mWinDragSlop)
-                            || (canClose && dx > mWinDragSlop))) {
+                    if ((canOpen && dx < -mWinDragSlop)
+                            || (canClose && dx > mWinDragSlop)) {
                         mWinDrag = true;
                     }
                 }
